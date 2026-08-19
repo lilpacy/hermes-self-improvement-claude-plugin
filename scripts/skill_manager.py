@@ -99,13 +99,31 @@ def sync_skill_record(registry: dict[str, Any], skills_root: Path, name: str) ->
     return record
 
 
-def sync_all(registry: dict[str, Any], skills_root: Path) -> None:
+def imported_owner(config: dict[str, Any], name: str) -> str | None:
+    for value in config.get("import_owner_registries", []):
+        source = load_json(expand_path(value), None)
+        if not isinstance(source, dict):
+            continue
+        record = source.get("skills", {}).get(name)
+        if isinstance(record, dict) and record.get("owner") in {"agent", "user"}:
+            return str(record["owner"])
+    return None
+
+
+def sync_all(config: dict[str, Any], registry: dict[str, Any], skills_root: Path) -> None:
     skills_root.mkdir(parents=True, exist_ok=True)
     for path in sorted(skills_root.iterdir()):
         if path.name.startswith("."):
             continue
-        if (path.is_dir() or path.is_symlink()) and (path / "SKILL.md").exists():
-            sync_skill_record(registry, skills_root, path.name)
+        if not ((path.is_dir() or path.is_symlink()) and (path / "SKILL.md").exists()):
+            continue
+        known = path.name in registry["skills"]
+        record = sync_skill_record(registry, skills_root, path.name)
+        if known or record is None or record.get("owner") == "external":
+            continue
+        owner = imported_owner(config, path.name)
+        if owner == "agent":
+            record.update({"owner": "agent", "protected": False, "created_by": "import:hermes-codex"})
 
 
 def read_input(path_value: str) -> str:
@@ -301,7 +319,7 @@ def create_skill(
 
 
 def command_list(config: dict[str, Any], state_root: Path, skills_root: Path, registry: dict[str, Any], as_json: bool) -> int:
-    sync_all(registry, skills_root)
+    sync_all(config, registry, skills_root)
     save_registry(state_root, registry)
     rows = []
     for name, record in sorted(registry["skills"].items()):
@@ -623,7 +641,7 @@ def main() -> int:
         with lock:
             registry = load_registry(state_root)
             purge_authorizations(registry)
-            sync_all(registry, skills_root)
+            sync_all(config, registry, skills_root)
             save_registry(state_root, registry)
             if args.command == "list":
                 return command_list(config, state_root, skills_root, registry, args.json)

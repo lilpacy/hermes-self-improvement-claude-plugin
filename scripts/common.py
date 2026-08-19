@@ -220,6 +220,7 @@ PLUGIN_NAME = "hermes-self-improvement"
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "skills_root": "~/.claude/skills",
+    "import_owner_registries": ["~/.local/state/hermes-codex/registry.json"],
     "background_review": {
         "enabled": True,
         "interval_turns": 10,
@@ -251,10 +252,18 @@ def _merge_defaults(base: Any, value: Any) -> Any:
 
 def ensure_config() -> tuple[Path, dict[str, Any]]:
     path = data_root() / "config.json"
+    defaults = DEFAULT_CONFIG
+    if not path.exists():
+        # First run: inherit the canonical skills root from a hermes-codex
+        # adapter install so both adapters manage the same skill directories.
+        codex_config = load_json(expand_path("~/.config/hermes-codex/config.json"), {})
+        if isinstance(codex_config, dict) and codex_config.get("skills_root"):
+            defaults = dict(DEFAULT_CONFIG)
+            defaults["skills_root"] = str(codex_config["skills_root"])
     current = load_json(path, {})
     if not isinstance(current, dict):
         raise RuntimeError(f"invalid config: {path}")
-    config = _merge_defaults(DEFAULT_CONFIG, current)
+    config = _merge_defaults(defaults, current)
     if config != current:
         atomic_write_json(path, config)
     return path, config

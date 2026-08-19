@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/fakebin" "$TMP/home/.claude/skills/user-skill" "$TMP/work"
+SKILLS="$TMP/home/dotfiles-skills"
+mkdir -p "$TMP/fakebin" "$SKILLS/user-skill" "$SKILLS/codex-learned" "$TMP/work" \
+  "$TMP/home/.config/hermes-codex" "$TMP/home/.local/state/hermes-codex"
 
 # 正常系: 背景レビューは claude ヘッドレスを固定フラグで起動し、helper 経由でのみ書き込む
 cat > "$TMP/fakebin/claude" <<'EOF'
@@ -45,13 +47,32 @@ exit 0
 EOF
 chmod +x "$TMP/fakebin/claude"
 
-cat > "$TMP/home/.claude/skills/user-skill/SKILL.md" <<'EOF'
+cat > "$SKILLS/user-skill/SKILL.md" <<'EOF'
 ---
 name: user-skill
 description: User maintained test skill.
 ---
 # User skill
 Original.
+EOF
+cat > "$SKILLS/codex-learned/SKILL.md" <<'EOF'
+---
+name: codex-learned
+description: Skill originally created by the hermes-codex background reviewer.
+---
+# Codex learned
+Verified procedure inherited from the codex adapter.
+EOF
+
+# 事前条件: hermes-codex adapter が同居し、canonical skills root と ownership を持つ
+cat > "$TMP/home/.config/hermes-codex/config.json" <<EOF
+{"version": 1, "skills_root": "$SKILLS"}
+EOF
+cat > "$TMP/home/.local/state/hermes-codex/registry.json" <<'EOF'
+{"version": 1, "authorizations": {}, "skills": {
+  "codex-learned": {"owner": "agent", "protected": false, "created_by": "background"},
+  "user-skill": {"owner": "user", "protected": true, "created_by": "user"}
+}}
 EOF
 
 # asdf等のshimはHOME差し替えで壊れるため、実pythonのbinを先に固定する
@@ -65,10 +86,22 @@ REVIEW="$ROOT/bin/hermes-claude-review"
 GUIDANCE="$(printf '{}\n' | python3 "$ROOT/hooks/session_start.py")"
 grep -q 'Guarded Claude Code adapter' <<<"$GUIDANCE"
 grep -q 'skill_manage' <<<"$GUIDANCE"
-[[ -f "$TMP/home/.claude/hermes-self-improvement/config.json" ]]
+CONFIG="$TMP/home/.claude/hermes-self-improvement/config.json"
+[[ -f "$CONFIG" ]]
+
+# 正常系: 初回configはhermes-codexのcanonical skills rootを引き継ぐ
+[[ "$(python3 -c "import json; print(json.load(open('$CONFIG'))['skills_root'])")" == "$SKILLS" ]]
+
+# 正常系: codex版registryでagent-ownedのskillはclaude版でもagent-ownedとして引き継ぐ
+[[ "$("$HELPER" owner codex-learned | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == agent ]]
 [[ "$("$HELPER" owner user-skill | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == user ]]
 
 "$HELPER" doctor >/dev/null
+
+# 正常系: 引き継いだagent-owned skillは自律patchできる
+printf 'Verified procedure inherited from the codex adapter.\n' > "$TMP/cold.txt"
+printf 'Verified procedure inherited from the codex adapter, kept current.\n' > "$TMP/cnew.txt"
+"$HELPER" patch codex-learned --old-file "$TMP/cold.txt" --new-file "$TMP/cnew.txt" >/dev/null
 
 # 正常系: agent-ownedスキルの自律作成とpatch
 cat > "$TMP/agent.md" <<'EOF'
@@ -97,7 +130,7 @@ AUTH_WARNING="$TMP/authorize-warning.txt"
 TOKEN="$("$HELPER" authorize user-skill --actions patch 2>"$AUTH_WARNING")"
 grep -q 'USER APPROVAL REQUIRED' "$AUTH_WARNING"
 "$HELPER" patch user-skill --old-file "$TMP/uold.txt" --new-file "$TMP/unew.txt" --authorization "$TOKEN" >/dev/null
-grep -q 'Authorized update' "$TMP/home/.claude/skills/user-skill/SKILL.md"
+grep -q 'Authorized update' "$SKILLS/user-skill/SKILL.md"
 
 # 異常系: background actorは保護スキルのauthorizationを発行できない
 if HERMES_CLAUDE_ACTOR=background "$HELPER" authorize user-skill --actions patch >/dev/null 2>&1; then
@@ -120,10 +153,12 @@ cat > "$TMP/transcript.jsonl" <<'EOF'
 EOF
 printf '%s\n' "{\"session_id\":\"smoke-session\",\"transcript_path\":\"$TMP/transcript.jsonl\",\"cwd\":\"$TMP/work\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false}" \
   | python3 "$ROOT/hooks/stop.py" >/dev/null
+NOTIFY="$TMP/home/.claude/hermes-self-improvement/notifications.jsonl"
 for _ in $(seq 1 100); do
-  [[ -d "$TMP/home/.claude/skills/background-learned" ]] && break
+  [[ -s "$NOTIFY" ]] && break
   sleep 0.1
 done
+[[ -d "$SKILLS/background-learned" ]]
 [[ "$("$HELPER" owner background-learned | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == agent ]]
 NOTICE="$(printf '%s\n' '{"session_id":"smoke-session","prompt":"next","cwd":"/tmp","hook_event_name":"UserPromptSubmit"}' \
   | python3 "$ROOT/hooks/user_prompt_submit.py")"
@@ -141,6 +176,8 @@ r = json.loads((home / '.claude/hermes-self-improvement/registry.json').read_tex
 assert r['skills']['user-skill']['owner'] == 'user'
 assert r['skills']['learned-test']['owner'] == 'agent'
 assert r['skills']['background-learned']['owner'] == 'agent'
+assert r['skills']['codex-learned']['owner'] == 'agent'
+assert r['skills']['codex-learned']['created_by'] == 'import:hermes-codex'
 audit = (home / '.claude/hermes-self-improvement/audit.jsonl').read_text()
 assert '"denied"' in audit and '"applied"' in audit
 hooks = json.loads(Path('$ROOT/hooks/hooks.json').read_text())['hooks']
