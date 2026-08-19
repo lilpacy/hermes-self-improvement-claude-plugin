@@ -220,6 +220,7 @@ PLUGIN_NAME = "hermes-self-improvement"
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "skills_root": "~/.claude/skills",
+    "registry_path": "",
     "import_owner_registries": ["~/.local/state/hermes-codex/registry.json"],
     "background_review": {
         "enabled": True,
@@ -254,12 +255,15 @@ def ensure_config() -> tuple[Path, dict[str, Any]]:
     path = data_root() / "config.json"
     defaults = DEFAULT_CONFIG
     if not path.exists():
-        # First run: inherit the canonical skills root from a hermes-codex
-        # adapter install so both adapters manage the same skill directories.
+        # First run: when a hermes-codex adapter install exists, share its
+        # canonical skills root AND its ownership registry so both adapters
+        # stay consistent while being used side by side.
         codex_config = load_json(expand_path("~/.config/hermes-codex/config.json"), {})
         if isinstance(codex_config, dict) and codex_config.get("skills_root"):
             defaults = dict(DEFAULT_CONFIG)
             defaults["skills_root"] = str(codex_config["skills_root"])
+            codex_state = str(codex_config.get("state_root", "~/.local/state/hermes-codex"))
+            defaults["registry_path"] = str(expand_path(codex_state) / "registry.json")
     current = load_json(path, {})
     if not isinstance(current, dict):
         raise RuntimeError(f"invalid config: {path}")
@@ -267,3 +271,7 @@ def ensure_config() -> tuple[Path, dict[str, Any]]:
     if config != current:
         atomic_write_json(path, config)
     return path, config
+
+def registry_file(config: dict[str, Any], state_root: Path) -> Path:
+    value = str(config.get("registry_path") or "").strip()
+    return expand_path(value) if value else state_root / "registry.json"

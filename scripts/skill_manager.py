@@ -18,6 +18,7 @@ from common import (
     data_root,
     ensure_config,
     plugin_root,
+    registry_file,
     SKILL_NAME_RE,
     append_jsonl,
     atomic_write_json,
@@ -41,7 +42,17 @@ def roots(config: dict[str, Any]) -> tuple[Path, Path]:
     return expand_path(config.get("skills_root", "~/.claude/skills")), data_root()
 
 
+_REGISTRY_OVERRIDE: Path | None = None
+
+
+def set_registry_override(path: Path | None) -> None:
+    global _REGISTRY_OVERRIDE
+    _REGISTRY_OVERRIDE = path
+
+
 def registry_path(state_root: Path) -> Path:
+    if _REGISTRY_OVERRIDE is not None:
+        return _REGISTRY_OVERRIDE
     return state_root / "registry.json"
 
 
@@ -553,7 +564,7 @@ def command_doctor(config: dict[str, Any], state_root: Path, skills_root: Path) 
         "config": (data_root() / "config.json").is_file(),
         "skills_root": skills_root.is_dir(),
         "state_root": state_root.is_dir(),
-        "registry": registry_path(state_root).is_file(),
+        "registry": registry_file(config, state_root).is_file(),
         "helper": (root / "bin/hermes-claude-skill").is_file(),
         "hooks_manifest": (root / "hooks/hooks.json").is_file(),
         "hermes_guidance": (root / "vendor/hermes/skills_guidance.txt").is_file()
@@ -636,7 +647,12 @@ def main() -> int:
     skills_root, state_root = roots(config)
     skills_root.mkdir(parents=True, exist_ok=True)
     state_root.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(state_root / "registry.lock", stale_seconds=1800)
+    shared_registry = registry_file(config, state_root)
+    set_registry_override(shared_registry)
+    shared_registry.parent.mkdir(parents=True, exist_ok=True)
+    # The lock lives next to the registry so hermes-codex and this adapter
+    # contend on the same file when the registry is shared.
+    lock = FileLock(shared_registry.with_name("registry.lock"), stale_seconds=1800)
     try:
         with lock:
             registry = load_registry(state_root)

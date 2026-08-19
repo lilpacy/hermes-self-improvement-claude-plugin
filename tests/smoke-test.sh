@@ -89,10 +89,12 @@ grep -q 'skill_manage' <<<"$GUIDANCE"
 CONFIG="$TMP/home/.claude/hermes-self-improvement/config.json"
 [[ -f "$CONFIG" ]]
 
-# 正常系: 初回configはhermes-codexのcanonical skills rootを引き継ぐ
+# 正常系: 初回configはhermes-codexのcanonical skills rootと共有registryを引き継ぐ
 [[ "$(python3 -c "import json; print(json.load(open('$CONFIG'))['skills_root'])")" == "$SKILLS" ]]
+SHARED_REGISTRY="$(python3 -c "import os; print(os.path.realpath('$TMP/home/.local/state/hermes-codex/registry.json'))")"
+[[ "$(python3 -c "import json; print(json.load(open('$CONFIG'))['registry_path'])")" == "$SHARED_REGISTRY" ]]
 
-# 正常系: codex版registryでagent-ownedのskillはclaude版でもagent-ownedとして引き継ぐ
+# 正常系: codex版registryでagent-ownedのskillはclaude版でもagent-owned(共有registryを直接参照)
 [[ "$("$HELPER" owner codex-learned | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == agent ]]
 [[ "$("$HELPER" owner user-skill | python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == user ]]
 
@@ -172,12 +174,13 @@ python3 - <<PY
 import json
 from pathlib import Path
 home = Path('$TMP/home')
-r = json.loads((home / '.claude/hermes-self-improvement/registry.json').read_text())
+# 正常系: ownershipは共有registryに書かれ、claude側で作ったskillもcodex側から同じownerで見える
+r = json.loads(Path('$SHARED_REGISTRY').read_text())
 assert r['skills']['user-skill']['owner'] == 'user'
 assert r['skills']['learned-test']['owner'] == 'agent'
 assert r['skills']['background-learned']['owner'] == 'agent'
 assert r['skills']['codex-learned']['owner'] == 'agent'
-assert r['skills']['codex-learned']['created_by'] == 'import:hermes-codex'
+assert not (home / '.claude/hermes-self-improvement/registry.json').exists()
 audit = (home / '.claude/hermes-self-improvement/audit.jsonl').read_text()
 assert '"denied"' in audit and '"applied"' in audit
 hooks = json.loads(Path('$ROOT/hooks/hooks.json').read_text())['hooks']

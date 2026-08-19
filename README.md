@@ -1,6 +1,6 @@
 # Hermes Self-Improvement Claude Plugin
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) の Skill 自己改善ループを Claude Code に移植した Claude Code plugin。[hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter) の Claude Code 版であり、同一マシンに codex adapter が導入済みの場合は canonical skills root と ownership を自動で引き継ぎます。
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) の Skill 自己改善ループを Claude Code に移植した Claude Code plugin。[hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter) の Claude Code 版であり、同一マシンに codex adapter が導入済みの場合は canonical skills root と ownership registry を共有し、両者を併用しても所有権が一貫します。
 
 Hermes の memory / user modeling / session search は移植対象外。Skill の自己改善ループのみを、上流プロンプト(`SKILLS_GUIDANCE` / `_SKILL_REVIEW_PROMPT`)を AST 抽出でそのまま用いて忠実に再現します。
 
@@ -32,7 +32,7 @@ flowchart TD
 |---|---|---|---|---|---|
 | skill が symlink である | Y | N | N | N | N |
 | helper `create` で作成された | - | Y | N | N | N |
-| codex adapter registry で `agent` | - | - | Y | N | N |
+| 共有 registry で `agent` | - | - | Y | N | N |
 | 有効な authorization token を提示 | - | - | - | Y | N |
 | **owner 判定** | external | agent | agent | user | user |
 | **自律 create/patch/edit/delete を許可する** | - | X | X | X(一回限り) | - |
@@ -72,7 +72,7 @@ flowchart TD
 |---|---|
 | skills root(後述) | skill 本体。既存 = user-owned、自動作成 = agent-owned、symlink = external |
 | `~/.claude/hermes-self-improvement/config.json` | 設定 |
-| `~/.claude/hermes-self-improvement/registry.json` | ownership registry と authorization token(hash 保存) |
+| registry(後述の決定表参照) | ownership registry と authorization token(hash 保存)。codex adapter 同居時は codex 側と同一ファイルを共有 |
 | `~/.claude/hermes-self-improvement/audit.jsonl` | 全操作の監査ログ(applied / denied / issued / read) |
 | `~/.claude/hermes-self-improvement/history/<skill>/<stamp>-<action>/` | 変更前の skill 全体のバックアップ |
 | `~/.claude/hermes-self-improvement/runtime/` | ターンカウンタ、queued event、review の実行ログ |
@@ -80,14 +80,15 @@ flowchart TD
 
 データ root は環境変数 `HERMES_CLAUDE_DATA_DIR` で変更できます。plugin のアンインストールと独立に残るため、監査履歴と ownership は plugin を入れ直しても失われません。
 
-### skills root の決定
+### skills root と registry の決定
 
 | 条件 \ ケース | 1 | 2 |
 |---|---|---|
 | 初回起動時に `~/.config/hermes-codex/config.json` が存在し `skills_root` を持つ | Y | N |
 | **skills root** | codex adapter と同じ canonical dir | `~/.claude/skills` |
+| **registry** | codex adapter の `<state_root>/registry.json` を共有 | `~/.claude/hermes-self-improvement/registry.json` |
 
-codex adapter と同居する場合、両 adapter は同一の skill ディレクトリ群を管理し、ownership も引き継がれます(§15)。
+codex adapter と同居する場合、両 adapter は同一の skill ディレクトリ群と単一の ownership registry を共同管理します(§15)。排他は registry と同じディレクトリの `registry.lock` で行い、両 adapter が同一ロックを取り合います。
 
 ## 3. 前提条件
 
@@ -265,8 +266,9 @@ hermes-claude-review run --transcript <path>      # 手動で 1 回実行
 
 | キー | デフォルト | 意味 |
 |---|---|---|
-| `skills_root` | `~/.claude/skills`(codex 同居時は引き継ぎ) | skill 本体の置き場所 |
-| `import_owner_registries` | `["~/.local/state/hermes-codex/registry.json"]` | 新規登録時に owner を引き継ぐ外部 registry |
+| `skills_root` | `~/.claude/skills`(codex 同居時は codex の canonical dir) | skill 本体の置き場所 |
+| `registry_path` | `""`(codex 同居時は codex の registry.json) | ownership registry の場所。空なら `~/.claude/hermes-self-improvement/registry.json` |
+| `import_owner_registries` | `["~/.local/state/hermes-codex/registry.json"]` | registry を共有**しない**構成でのみ有効な、新規登録時の owner 引き継ぎ元 |
 | `background_review.enabled` | `true` | background review の有効 / 無効 |
 | `background_review.interval_turns` | `10` | 起動間隔(ターン)。境界: `count % interval == 0` の Stop で起動 |
 | `background_review.timeout_seconds` | `900` | reviewer の強制終了(下限 30) |
@@ -332,15 +334,27 @@ git diff vendor/hermes/ && git commit
 
 ## 15. hermes-codex adapter との共存
 
-同一マシンに codex adapter が導入済みの場合の挙動:
+両 adapter を併用する前提の設計です。同一マシンに codex adapter が導入済みの場合:
+
+```mermaid
+flowchart LR
+  CX[hermes-codex adapter] -- registry.lock で排他 --> REG[(共有 registry.json)]
+  CL[この plugin] -- registry.lock で排他 --> REG
+  CX --> SK[(canonical skills root)]
+  CL --> SK
+  CX --> AX[(codex 側 audit / history)]
+  CL --> AL[(claude 側 audit / history)]
+```
 
 | 項目 | 挙動 |
 |---|---|
 | skills root | 初回起動時に codex config の `skills_root` を引き継ぎ、両 adapter が同一の canonical dir を管理 |
-| ownership(codex → claude) | claude 側 registry に未登録の skill を登録する際、codex registry で `agent` なら `agent` として引き継ぐ(`created_by: import:hermes-codex`) |
-| ownership(claude → codex) | 引き継がれない。codex 側は既定で user-owned 扱いになる(codex adapter に同等の import 機能を足すまでの既知の非対称) |
-| registry / audit / history | それぞれ独立(claude: `~/.claude/hermes-self-improvement/`、codex: `~/.local/state/hermes-codex/`) |
-| 引き継ぎのタイミング | registry への初回登録時のみ。登録済み skill の owner は以後 import で変わらない(`adopt` / `release` で明示的に変更) |
+| ownership registry | **単一ファイルを共有**(初回起動時に codex の `<state_root>/registry.json` を `registry_path` に設定)。フォーマットは完全互換 |
+| ownership(双方向) | どちらの adapter で create / adopt / release しても、もう一方から即座に同じ owner として見える |
+| authorization token | registry 内で共有される。どちらの adapter で発行しても有効(一回限り・TTL・skill/action 限定は共通) |
+| 排他制御 | registry と同じディレクトリの `registry.lock`(O_EXCL)を両 adapter が取り合う |
+| audit / history / 通知 | それぞれ独立(claude: `~/.claude/hermes-self-improvement/`、codex: `~/.local/state/hermes-codex/`) |
+| `import_owner_registries` | registry を共有しない構成(codex config が無い等)でのみ働く fallback。共有時は登録済み record が常に優先され、実質 no-op |
 
 ### Claude Code からの skill 可視性
 
@@ -353,6 +367,7 @@ Claude Code が skill として読み込むのは `~/.claude/skills` / project `
 - transcript は不安定なフォーマットとして扱い、パースせず生のまま reviewer に渡します
 - background reviewer は通常の Claude Code と同じ認証・利用枠を消費します(モデルは `config --model` で軽量化可能)
 - reviewer の `Write` は一時ディレクトリでの scratch ファイル作成を想定していますが、パス単位では拘束していません(最終防衛線は helper 側の enforcement)
+- registry を codex 側と共有している場合、codex adapter を `--purge-state` 付きでアンインストールすると共有 registry ごと消えます。その後の再登録では全 skill が user-owned 扱いに戻るため、必要なら registry を backup してください
 - helper を迂回した直接ファイル書き込みの禁止は、フォアグラウンドでは Claude Code の通常の permission フロー、それを通過した後は advisory です
 
 ## 17. 保護の強度
