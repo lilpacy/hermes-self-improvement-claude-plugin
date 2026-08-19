@@ -1,0 +1,6 @@
+{
+  "name": "hermes-self-improvement",
+  "description": "Hermes-compatible skill self-improvement for Claude Code: foreground skill learning via a guarded ownership-enforcing helper, plus periodic isolated background transcript reviews.",
+  "version": "0.1.0",
+  "author": { "name": "lilpacy" }
+}

@@ -1,0 +1,14 @@
+{
+  "commit": "8430c1b4da889f5e72153d59a129b2f19c19beba",
+  "fetched_at": "2026-08-19T21:59:11Z",
+  "files": {
+    "LICENSE.hermes-agent": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+    "background_review.py": "18cd46ef8649771447e6afd1dd396cc078195a50b9c4b3880bf4632946c2556c",
+    "combined_review_prompt.txt": "ae20b62f4568218fabd5e41f456e3e5b1518b9974894f90c621461664aef6cd7",
+    "prompt_builder.py": "bfb9a774d0c6c2490bc26fcef727ed2d38d0be2fab62a4782f69230101c9e997",
+    "skill_review_prompt.txt": "f07643c6cd59360acf16895b849a9fb88c1a9f1cf94db0fad28515c4c2bdca72",
+    "skills_guidance.txt": "ee7c8a279107df8e27c24bf4194a902c50c096b28f5479ae25421579e3eae1b7"
+  },
+  "repository": "NousResearch/hermes-agent",
+  "requested_ref": "main"
+}

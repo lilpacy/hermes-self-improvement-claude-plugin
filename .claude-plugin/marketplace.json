@@ -1,0 +1,11 @@
+{
+  "name": "lilpacy",
+  "owner": { "name": "lilpacy" },
+  "plugins": [
+    {
+      "name": "hermes-self-improvement",
+      "source": "./",
+      "description": "Hermes-compatible skill self-improvement loop (foreground + background review) for Claude Code."
+    }
+  ]
+}
