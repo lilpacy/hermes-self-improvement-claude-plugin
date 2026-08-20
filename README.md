@@ -1,5 +1,16 @@
 # Hermes Self-Improvement Claude Plugin
 
+A Claude Code plugin that ports the skill self-improvement loop of the [Hermes Agent](https://github.com/NousResearch/hermes-agent): Claude learns reusable skills from its own work in the foreground, and an isolated `claude -p` background reviewer catches missed learnings every N turns — all writes gated by an ownership-enforcing helper (agent/user/external, one-time authorization tokens, audit log). Claude Code port of [hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter); when that adapter is installed, both share one canonical skills root and one ownership registry.
+
+```text
+/plugin marketplace add lilpacy/hermes-self-improvement-claude-plugin
+/plugin install hermes-self-improvement@lilpacy
+```
+
+Documentation below is in Japanese.
+
+---
+
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) の Skill 自己改善ループを Claude Code に移植した Claude Code plugin。[hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter) の Claude Code 版であり、同一マシンに codex adapter が導入済みの場合は canonical skills root と ownership registry を共有し、両者を併用しても所有権が一貫します。
 
 Hermes の memory / user modeling / session search は移植対象外。Skill の自己改善ループのみを、上流プロンプト(`SKILLS_GUIDANCE` / `_SKILL_REVIEW_PROMPT`)を AST 抽出でそのまま用いて忠実に再現します。
