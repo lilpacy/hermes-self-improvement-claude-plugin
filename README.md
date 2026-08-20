@@ -1,398 +1,389 @@
 # Hermes Self-Improvement Claude Plugin
 
-A Claude Code plugin that ports the skill self-improvement loop of the [Hermes Agent](https://github.com/NousResearch/hermes-agent): Claude learns reusable skills from its own work in the foreground, and an isolated `claude -p` background reviewer catches missed learnings every N turns — all writes gated by an ownership-enforcing helper (agent/user/external, one-time authorization tokens, audit log). Claude Code port of [hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter); when that adapter is installed, both share one canonical skills root and one ownership registry.
+English | [日本語](README.ja.md)
 
-```text
-/plugin marketplace add lilpacy/hermes-self-improvement-claude-plugin
-/plugin install hermes-self-improvement@lilpacy
-```
+A Claude Code plugin that ports the skill self-improvement loop of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) to Claude Code. It is the Claude Code counterpart of [hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter); when that adapter is installed on the same machine, both share one canonical skills root and one ownership registry, so ownership stays consistent while using both side by side.
 
-Documentation below is in Japanese.
+Hermes's memory / user modeling / session search are out of scope. Only the skill self-improvement loop is reproduced, faithfully, using the upstream prompts (`SKILLS_GUIDANCE` / `_SKILL_REVIEW_PROMPT`) extracted verbatim by AST parsing.
 
----
+## 1. What it does
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) の Skill 自己改善ループを Claude Code に移植した Claude Code plugin。[hermes-self-improvement-codex-adapter](https://github.com/lilpacy/hermes-self-improvement-codex-adapter) の Claude Code 版であり、同一マシンに codex adapter が導入済みの場合は canonical skills root と ownership registry を共有し、両者を併用しても所有権が一貫します。
-
-Hermes の memory / user modeling / session search は移植対象外。Skill の自己改善ループのみを、上流プロンプト(`SKILLS_GUIDANCE` / `_SKILL_REVIEW_PROMPT`)を AST 抽出でそのまま用いて忠実に再現します。
-
-## 1. 実現する挙動
-
-| ループ | 契機 | 仕組み |
+| Loop | Trigger | Mechanism |
 |---|---|---|
-| フォアグラウンド学習 | 会話中の学び(非自明なタスク完了、エラー回復、ユーザー訂正、再利用可能な手順の発見) | `SessionStart` hook が毎セッション Hermes の `SKILLS_GUIDANCE` と adapter ポリシーを context に注入し、Claude 自身がガード付き helper 経由で agent-owned skill を即時作成・patch |
-| バックグラウンド学習 | N ターン完了ごと(デフォルト 10) | `Stop` hook が transcript をコピーし、隔離された `claude -p --bare` プロセスに Hermes の `_SKILL_REVIEW_PROMPT` を実行させて取りこぼしを回収。結果は次の `UserPromptSubmit` で通知 |
+| Foreground learning | Learnings during conversation (non-trivial task completion, error recovery, user correction, discovery of a reusable procedure) | A `SessionStart` hook injects Hermes's `SKILLS_GUIDANCE` and the adapter policy into context every session; Claude itself creates/patches agent-owned skills immediately through the guarded helper |
+| Background learning | Every N completed turns (default 10) | A `Stop` hook copies the transcript and has an isolated `claude -p --bare` process run Hermes's `_SKILL_REVIEW_PROMPT` to catch missed learnings; results are delivered at the next `UserPromptSubmit` |
 
-### アーキテクチャ
+### Architecture
 
 ```mermaid
 flowchart TD
-  SS[SessionStart hook] -- "初回: config/registry初期化\n毎回: SKILLS_GUIDANCE注入" --> CTX[セッション context]
-  ST[Stop hook] -- "Nターンごと transcript copy" --> RW[review_worker.py]
-  RW -- "claude -p --bare --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[隔離 background reviewer]
+  SS[SessionStart hook] -- "first run: init config/registry\nevery run: inject SKILLS_GUIDANCE" --> CTX[session context]
+  ST[Stop hook] -- "every N turns: transcript copy" --> RW[review_worker.py]
+  RW -- "claude -p --bare --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[isolated background reviewer]
   BG --> HL[bin/hermes-claude-skill]
-  HL -- "ownership強制 / token / audit / history" --> SK[skills root]
+  HL -- "ownership enforcement / tokens / audit / history" --> SK[skills root]
   RW -- notifications.jsonl --> UP[UserPromptSubmit hook]
   UP -- additionalContext --> CTX
-  PT[PreToolUse hook] -- "ガード済みsubcommandのみ自動許可" --> HL
+  PT[PreToolUse hook] -- "auto-allow guarded subcommands only" --> HL
   DATA[(~/.claude/hermes-self-improvement/\nconfig / registry / audit / history / logs)] --- HL
 ```
 
-### 所有権デシジョンテーブル
+### Ownership decision table
 
-| 条件 \ ケース | 1 | 2 | 3 | 4 | 5 |
+| Condition \ Case | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|
-| skill が symlink である | Y | N | N | N | N |
-| helper `create` で作成された | - | Y | N | N | N |
-| 共有 registry で `agent` | - | - | Y | N | N |
-| 有効な authorization token を提示 | - | - | - | Y | N |
-| **owner 判定** | external | agent | agent | user | user |
-| **自律 create/patch/edit/delete を許可する** | - | X | X | X(一回限り) | - |
+| Skill is a symlink | Y | N | N | N | N |
+| Created via helper `create` | - | Y | N | N | N |
+| `agent` in the shared registry | - | - | Y | N | N |
+| Valid authorization token presented | - | - | - | Y | N |
+| **Resulting owner** | external | agent | agent | user | user |
+| **Autonomous create/patch/edit/delete allowed** | - | X | X | X (single use) | - |
 
-凡例: 条件 `Y` = 真、`N` = 偽、`-` = 無関係。動作 `X` = 実行する、`-` = 拒否。
+Legend: condition `Y` = true, `N` = false, `-` = irrelevant. Action `X` = allowed, `-` = denied.
 
-- user-owned skill の変更は、ユーザーがそのターンで明示依頼した場合のみ `authorize` の一回限り token(skill・action 限定、TTL 30〜3600 秒・デフォルト 600 秒)経由で可能。
-- `adopt` / `release` で ownership を user ⇄ agent に移動(明示依頼時のみ)。
-- background reviewer は `authorize` / `adopt` / `release` / `create-user` を一切実行できない(helper 内で強制)。
-- external(symlink)skill は常に読み取り専用で、adopt もできない。
+- Changes to user-owned skills are possible only when the user explicitly requests them in the current turn, via a single-use `authorize` token (scoped to one skill and specific actions, TTL 30–3600s, default 600s).
+- `adopt` / `release` move ownership between user ⇄ agent (explicit request only).
+- The background reviewer can never run `authorize` / `adopt` / `release` / `create-user` (enforced inside the helper).
+- External (symlinked) skills are always read-only and cannot be adopted.
 
-## 2. 配置
+## 2. Layout
 
-### リポジトリ構成
+### Repository layout
 
-| パス | 内容 |
+| Path | Contents |
 |---|---|
-| `.claude-plugin/plugin.json` | plugin manifest |
-| `.claude-plugin/marketplace.json` | この repo 自体を marketplace として追加するための定義 |
-| `hooks/hooks.json` | 4 hook の登録(plugin 機構が自動で読み込む) |
-| `hooks/session_start.py` | 初回初期化 + ガイダンス注入 |
-| `hooks/stop.py` | ターン数計数と background review の起動 |
-| `hooks/user_prompt_submit.py` | background review 結果の通知 |
-| `hooks/pre_tool_use.py` | ガード済み helper コマンドの自動許可 |
-| `scripts/skill_manager.py` | ownership 強制・token・audit・history を担う中核 |
-| `scripts/review_worker.py` | 隔離 background review の実行 |
-| `scripts/review_cli.py` | review の status/run/logs/config/upstream-update |
-| `scripts/vendor_prompts.py` | Hermes 上流プロンプトの AST 抽出(メンテナ用) |
-| `bin/hermes-claude-skill` / `bin/hermes-claude-review` | CLI wrapper(plugin の `bin/` は Claude Code の Bash セッションで PATH に入る) |
-| `vendor/hermes/` | 抽出済み上流プロンプト + `UPSTREAM.json`(pinned commit + SHA-256)+ 上流 LICENSE |
-| `prompts/*.fallback.txt` | vendor が無い場合のオフライン fallback(Hermes 本文は含まない) |
-| `tests/smoke-test.sh` | fake claude による一括検証 |
+| `.claude-plugin/plugin.json` | Plugin manifest |
+| `.claude-plugin/marketplace.json` | Marketplace definition so this repo itself can be added as a marketplace |
+| `hooks/hooks.json` | Registration of the four hooks (loaded automatically by the plugin system) |
+| `hooks/session_start.py` | First-run initialization + guidance injection |
+| `hooks/stop.py` | Turn counting and background-review launch |
+| `hooks/user_prompt_submit.py` | Delivery of background-review results |
+| `hooks/pre_tool_use.py` | Auto-allow for guarded helper commands |
+| `scripts/skill_manager.py` | The core enforcing ownership, tokens, audit, and history |
+| `scripts/review_worker.py` | Isolated background review execution |
+| `scripts/review_cli.py` | Review status/run/logs/config/upstream-update |
+| `scripts/vendor_prompts.py` | AST extraction of upstream Hermes prompts (maintainer tool) |
+| `bin/hermes-claude-skill` / `bin/hermes-claude-review` | CLI wrappers (a plugin's `bin/` is added to PATH in Claude Code Bash sessions) |
+| `vendor/hermes/` | Extracted upstream prompts + `UPSTREAM.json` (pinned commit + SHA-256) + upstream LICENSE |
+| `prompts/*.fallback.txt` | Offline fallbacks used when vendor files are absent (contain no Hermes text) |
+| `tests/smoke-test.sh` | End-to-end verification against a fake claude |
 
-### 実行時に作られるパス
+### Paths created at runtime
 
-| パス | 内容 |
+| Path | Contents |
 |---|---|
-| skills root(後述) | skill 本体。既存 = user-owned、自動作成 = agent-owned、symlink = external |
-| `~/.claude/hermes-self-improvement/config.json` | 設定 |
-| registry(後述の決定表参照) | ownership registry と authorization token(hash 保存)。codex adapter 同居時は codex 側と同一ファイルを共有 |
-| `~/.claude/hermes-self-improvement/audit.jsonl` | 全操作の監査ログ(applied / denied / issued / read) |
-| `~/.claude/hermes-self-improvement/history/<skill>/<stamp>-<action>/` | 変更前の skill 全体のバックアップ |
-| `~/.claude/hermes-self-improvement/runtime/` | ターンカウンタ、queued event、review の実行ログ |
-| `~/.claude/hermes-self-improvement/notifications.jsonl` | 未配送の background review 結果 |
+| skills root (see below) | The skills themselves. Pre-existing = user-owned, auto-created = agent-owned, symlinked = external |
+| `~/.claude/hermes-self-improvement/config.json` | Configuration |
+| registry (see decision table below) | Ownership registry and authorization tokens (stored hashed). Shared with the codex adapter when it coexists |
+| `~/.claude/hermes-self-improvement/audit.jsonl` | Audit log of all operations (applied / denied / issued / read) |
+| `~/.claude/hermes-self-improvement/history/<skill>/<stamp>-<action>/` | Full pre-change snapshots of each skill |
+| `~/.claude/hermes-self-improvement/runtime/` | Turn counters, queued events, review execution logs |
+| `~/.claude/hermes-self-improvement/notifications.jsonl` | Undelivered background-review results |
 
-データ root は環境変数 `HERMES_CLAUDE_DATA_DIR` で変更できます。plugin のアンインストールと独立に残るため、監査履歴と ownership は plugin を入れ直しても失われません。
+The data root can be moved with the `HERMES_CLAUDE_DATA_DIR` environment variable. It survives plugin uninstalls, so audit history and ownership are not lost across reinstalls.
 
-### skills root と registry の決定
+### How skills root and registry are decided
 
-| 条件 \ ケース | 1 | 2 |
+| Condition \ Case | 1 | 2 |
 |---|---|---|
-| 初回起動時に `~/.config/hermes-codex/config.json` が存在し `skills_root` を持つ | Y | N |
-| **skills root** | codex adapter と同じ canonical dir | `~/.claude/skills` |
-| **registry** | codex adapter の `<state_root>/registry.json` を共有 | `~/.claude/hermes-self-improvement/registry.json` |
+| `~/.config/hermes-codex/config.json` exists with `skills_root` at first run | Y | N |
+| **skills root** | Same canonical dir as the codex adapter | `~/.claude/skills` |
+| **registry** | Shares the codex adapter's `<state_root>/registry.json` | `~/.claude/hermes-self-improvement/registry.json` |
 
-codex adapter と同居する場合、両 adapter は同一の skill ディレクトリ群と単一の ownership registry を共同管理します(§15)。排他は registry と同じディレクトリの `registry.lock` で行い、両 adapter が同一ロックを取り合います。
+When coexisting with the codex adapter, both adapters co-manage the same skill directories and a single ownership registry (§15). Mutual exclusion uses `registry.lock` next to the registry, so both adapters contend on the same lock.
 
-## 3. 前提条件
+## 3. Prerequisites
 
-- macOS / Linux / WSL2(ネイティブ Windows は未検証)
-- `claude`(Claude Code CLI)と `python3` が PATH にあること
-- background review は `claude -p`(ヘッドレス)を起動するため、通常の Claude Code と同じ認証・利用枠を消費します
+- macOS / Linux / WSL2 (native Windows untested)
+- `claude` (Claude Code CLI) and `python3` on PATH
+- The background review launches `claude -p` (headless), consuming the same authentication and usage quota as regular Claude Code
 
-## 4. インストール
+## 4. Installation
 
-### 4.1 GitHub から
+### 4.1 From GitHub
 
 ```text
 /plugin marketplace add lilpacy/hermes-self-improvement-claude-plugin
 /plugin install hermes-self-improvement@lilpacy
 ```
 
-### 4.2 ローカル開発
+### 4.2 Local development
 
 ```bash
 git clone git@github.com:lilpacy/hermes-self-improvement-claude-plugin.git
 claude --plugin-dir /path/to/hermes-self-improvement-claude-plugin
 ```
 
-`--plugin-dir` は同名のインストール済み plugin より優先されるため、開発中の検証に使えます。
+`--plugin-dir` takes precedence over an installed plugin of the same name, which makes it handy for testing changes.
 
-### 4.3 インストール後に起きること
+### 4.3 What happens after install
 
-install script はありません。初回セッション開始時に `SessionStart` hook が次を行います。
+There is no install script. On the first session start, the `SessionStart` hook does the following:
 
 ```mermaid
 flowchart TD
-  A[SessionStart] --> B{config.json が存在?}
-  B -- いいえ --> C{hermes-codex config が存在?}
-  C -- はい --> D[skills_root を codex 版から引き継いで生成]
-  C -- いいえ --> E[skills_root = ~/.claude/skills で生成]
-  B -- はい --> F[registry を同期]
+  A[SessionStart] --> B{config.json exists?}
+  B -- no --> C{hermes-codex config exists?}
+  C -- yes --> D[create config inheriting the codex skills root and registry]
+  C -- no --> E[create config with skills_root = ~/.claude/skills]
+  B -- yes --> F[sync registry]
   D --> F
   E --> F
-  F --> G{registry 未登録の skill?}
-  G -- "はい / codex registry で agent" --> H[agent-owned として登録]
-  G -- "はい / それ以外" --> I[user-owned として登録<br/>symlink は external]
-  G -- いいえ --> J[SKILLS_GUIDANCE を context に注入]
+  F --> G{skills not yet in the registry?}
+  G -- "yes / agent in shared registry" --> H[register as agent-owned]
+  G -- "yes / anything else" --> I[register as user-owned<br/>symlinks as external]
+  G -- no --> J[inject SKILLS_GUIDANCE into context]
   H --> J
   I --> J
 ```
 
-## 5. Hook の確認
+## 5. Hooks
 
-plugin の hook は `hooks/hooks.json` から自動登録されます。`/hooks` で次の 4 つが plugin 由来として見えることを確認してください。
+Plugin hooks register automatically from `hooks/hooks.json`. Check `/hooks` and confirm these four appear as plugin-provided:
 
-| event | 役割 | timeout |
+| Event | Role | Timeout |
 |---|---|---|
-| `SessionStart` | 初期化 + ガイダンス注入 | 15s |
-| `Stop` | ターン計数、N ターンごとに review 起動(非同期・detach) | 5s |
-| `UserPromptSubmit` | 未配送の review 結果を `additionalContext` で注入 | 3s |
-| `PreToolUse` (Bash) | ガード済み helper subcommand のみ `permissionDecision: allow` | 5s |
+| `SessionStart` | Initialization + guidance injection | 15s |
+| `Stop` | Turn counting; every N turns launches the review (async, detached) | 5s |
+| `UserPromptSubmit` | Injects undelivered review results as `additionalContext` | 3s |
+| `PreToolUse` (Bash) | Returns `permissionDecision: allow` for guarded helper subcommands only | 5s |
 
-## 6. 導入確認
+## 6. Verifying the install
 
 ```bash
-# helper の自己診断(claude 実行ファイル、config、registry、vendor prompt などを検査)
-~/.claude/plugins/cache/<marketplace>/hermes-self-improvement/<version>/bin/hermes-claude-skill doctor
+# helper self-diagnosis (claude executable, config, registry, vendored prompts, ...)
+hermes-claude-skill doctor
 
-# review 設定と upstream pin の確認
-bin/hermes-claude-review status
+# review settings and the upstream pin
+hermes-claude-review status
 ```
 
-Claude Code のセッション内なら plugin の `bin/` が PATH に入るため、`hermes-claude-skill doctor` で直接呼べます。新しいセッションを開始し、context に `## Hermes-compatible skill self-improvement` が注入されていることも確認してください。
+Inside a Claude Code session the plugin's `bin/` is on PATH, so the commands above work directly. Also start a new session and confirm that `## Hermes-compatible skill self-improvement` is injected into context.
 
-## 7. 通常会話中の自己改善(foreground)
+## 7. Self-improvement during normal conversation (foreground)
 
-Claude は注入されたガイダンスに従い、学びが確定したターンの終わりに自律で skill を保存・更新します。
+Following the injected guidance, Claude autonomously saves or updates skills at the end of turns where a learning is confirmed.
 
 ```mermaid
 flowchart TD
-  A[非自明な成功 / エラー回復 / ユーザー訂正 / 手順発見] --> B{保存に値する検証済み手順?}
-  B -- いいえ --> Z[何もしない]
-  B -- はい --> C{対象 skill の owner}
-  C -- 未存在 --> D[SKILL.md を scratch に書き helper create<br/>= agent-owned]
-  C -- agent --> E[helper patch で即時更新]
-  C -- user --> F{ユーザーがこのターンで明示依頼?}
-  F -- はい --> G[helper authorize で token 取得 → 一回限り更新]
-  F -- いいえ --> Z2[変更しない・提案に留める]
-  C -- external --> Z3[常に読み取り専用]
+  A[non-trivial success / error recovery / user correction / procedure discovery] --> B{verified procedure worth saving?}
+  B -- no --> Z[do nothing]
+  B -- yes --> C{owner of the target skill}
+  C -- not present --> D[write SKILL.md to scratch, then helper create<br/>= agent-owned]
+  C -- agent --> E[update immediately with helper patch]
+  C -- user --> F{explicit user request this turn?}
+  F -- yes --> G[helper authorize for a token → single-use update]
+  F -- no --> Z2[leave unchanged; suggest instead]
+  C -- external --> Z3[always read-only]
 ```
 
-`PreToolUse` hook により、read 系とガード済み書き込み(`list` / `view` / `create` / `patch` / `edit` / `write-file` / `remove-file` / `delete` / `owner` / `audit` / `doctor` / `status` / `logs` / `config`)は許可プロンプトなしで実行されます。ownership を変える `authorize` / `adopt` / `release` / `create-user` は通常の許可フローに残るため、ユーザーが目視で承認することになります。シェル結合(`;` `|` `&` など)を含むコマンドは自動許可しません。
+Thanks to the `PreToolUse` hook, reads and guarded writes (`list` / `view` / `create` / `patch` / `edit` / `write-file` / `remove-file` / `delete` / `owner` / `audit` / `doctor` / `status` / `logs` / `config`) run without permission prompts. Ownership-changing commands (`authorize` / `adopt` / `release` / `create-user`) stay on the normal permission flow, so the user visually approves them. Commands containing shell composition (`;` `|` `&` etc.) are never auto-allowed.
 
 ## 8. Background review
 
 ```mermaid
 flowchart TD
-  A[Stop hook] --> B{有効 / interval 到達 / transcript サイズ上限内?}
-  B -- いいえ --> Z[何もしない]
-  B -- はい --> C[transcript を runtime/events にコピーし event を queue]
-  C --> D[review_worker.py を detach 起動]
-  D --> E[一時ディレクトリに transcript を配置]
+  A[Stop hook] --> B{enabled / interval reached / transcript within size limit?}
+  B -- no --> Z[do nothing]
+  B -- yes --> C[copy transcript to runtime/events and queue an event]
+  C --> D[launch review_worker.py detached]
+  D --> E[place transcript in a temp directory]
   E --> F["claude -p --bare --permission-mode dontAsk<br/>--allowedTools Read,Write,Bash(helper *)"]
-  F --> G[Hermes _SKILL_REVIEW_PROMPT + adapter 制約で審査]
-  G --> H[helper 経由の変更のみ audit に applied として残る]
-  H --> I[notifications.jsonl に結果を追記 / transcript コピー削除]
-  I --> J[次の UserPromptSubmit で通知]
+  F --> G[review with Hermes _SKILL_REVIEW_PROMPT + adapter constraints]
+  G --> H[only helper-mediated changes land in audit as applied]
+  H --> I[append result to notifications.jsonl / delete transcript copy]
+  I --> J[delivered at the next UserPromptSubmit]
 ```
 
-隔離の内訳:
+How the isolation works:
 
-- `--bare`: hooks / plugins / MCP を読み込まないため、reviewer 自身の Stop hook 再帰が構造的に発生しない(`HERMES_CLAUDE_BACKGROUND=1` ガードも保険で残置)
-- `--permission-mode dontAsk` + `--allowedTools`: 許可プロンプトを出さず、道具を `Read` / `Write` / helper の `Bash` に制限
-- `HERMES_CLAUDE_ACTOR=background`: helper が ownership 変更系コマンドを一律拒否
-- 実行ディレクトリは一時ディレクトリで、元の作業リポジトリには「context としてのみ扱い、アクセスするな」とプロンプトで明示
-- 同時実行は lock で 1 本に制限、timeout(デフォルト 900 秒)で強制終了
+- `--bare`: no hooks / plugins / MCP are loaded, so recursion through the reviewer's own Stop hook is structurally impossible (the `HERMES_CLAUDE_BACKGROUND=1` guard remains as a belt-and-braces)
+- `--permission-mode dontAsk` + `--allowedTools`: no permission prompts; tools restricted to `Read` / `Write` / the helper via `Bash`
+- `HERMES_CLAUDE_ACTOR=background`: the helper rejects all ownership-changing commands outright
+- The working directory is a temp dir; the prompt explicitly says the original repository is context only and must not be touched
+- Concurrency is limited to one run via a lock; a timeout (default 900s) kills stuck runs
 
-## 9. Skill 管理コマンド
+## 9. Skill management commands
 
-以下、`hermes-claude-skill` は plugin の `bin/hermes-claude-skill`(セッション内なら PATH 済み)。
+Below, `hermes-claude-skill` means the plugin's `bin/hermes-claude-skill` (already on PATH inside sessions).
 
-### 一覧・参照
+### Listing and viewing
 
 ```bash
 hermes-claude-skill list            # NAME/OWNER/PROTECTED/EXISTS/PATCHES
 hermes-claude-skill list --json
-hermes-claude-skill view <name>                 # SKILL.md を表示
-hermes-claude-skill view <name> --file <rel>    # 付属ファイルを表示
-hermes-claude-skill owner <name>                # registry record を表示
+hermes-claude-skill view <name>                 # print SKILL.md
+hermes-claude-skill view <name> --file <rel>    # print an attached file
+hermes-claude-skill owner <name>                # print the registry record
 ```
 
-### agent-owned skill(自律運用)
+### Agent-owned skills (autonomous)
 
 ```bash
-# 作成: 完全な SKILL.md を scratch に書いてから
+# create: write a complete SKILL.md to scratch first
 hermes-claude-skill create <name> --content-file /tmp/skill.md
 
-# 更新: 完全一致・単一出現の old/new 置換(推奨)
+# update: exact-match, single-occurrence old/new replacement (preferred)
 hermes-claude-skill patch <name> --old-file /tmp/old.txt --new-file /tmp/new.txt
 
-# 全置換 / 付属ファイル / 削除
+# full replace / attached files / delete
 hermes-claude-skill edit <name> --content-file /tmp/skill.md
 hermes-claude-skill write-file <name> references/notes.md --file /tmp/notes.md
 hermes-claude-skill remove-file <name> references/notes.md
-hermes-claude-skill delete <name>   # history へ退避してから削除
+hermes-claude-skill delete <name>   # moved to history before removal
 ```
 
-`create` / `edit` / `patch` は frontmatter(`name` が dir 名と一致・`description` 必須)、サイズ上限、行数上限、secret パターン(AWS key・private key・GitHub token 等)を検証し、失敗した変更は原子的にロールバックされます。
+`create` / `edit` / `patch` validate frontmatter (`name` must equal the directory name, `description` required), size limits, line limits, and secret patterns (AWS keys, private keys, GitHub tokens, ...); failed changes roll back atomically.
 
-### user-owned skill を一回だけ更新(明示依頼時のみ)
+### One-shot update of a user-owned skill (explicit request only)
 
 ```bash
-TOKEN=$(hermes-claude-skill authorize <name> --actions patch)   # stderr に USER APPROVAL REQUIRED 警告
+TOKEN=$(hermes-claude-skill authorize <name> --actions patch)   # USER APPROVAL REQUIRED warning on stderr
 hermes-claude-skill patch <name> --old-file old.txt --new-file new.txt --authorization "$TOKEN"
 ```
 
-token は skill・action 限定、一回限り、TTL デフォルト 600 秒(`--ttl 30..3600`)。background actor は発行も使用もできません。
+Tokens are scoped to one skill and specific actions, single-use, TTL default 600s (`--ttl 30..3600`). The background actor can neither issue nor use them.
 
-### 所有権移管(明示依頼時のみ)
+### Ownership transfer (explicit request only)
 
 ```bash
-hermes-claude-skill adopt <name>     # user → agent(以後自律更新を許可)
-hermes-claude-skill release <name>   # agent → user(以後自律更新を拒否)
-hermes-claude-skill create-user <name> --content-file /tmp/skill.md   # 最初から user-owned で作成
+hermes-claude-skill adopt <name>     # user → agent (autonomous updates allowed from now on)
+hermes-claude-skill release <name>   # agent → user (autonomous updates denied from now on)
+hermes-claude-skill create-user <name> --content-file /tmp/skill.md   # create as user-owned from the start
 ```
 
-## 10. Background 設定
+## 10. Background settings
 
 ```bash
 hermes-claude-review status
-hermes-claude-review config --interval 5          # N ターンごと(0 で無効)
-hermes-claude-review config --model haiku         # reviewer のモデル
+hermes-claude-review config --interval 5          # every N turns (0 disables)
+hermes-claude-review config --model haiku         # reviewer model
 hermes-claude-review config --timeout 600
 hermes-claude-review config --disable / --enable
 hermes-claude-review logs --tail 10
-hermes-claude-review run --transcript <path>      # 手動で 1 回実行
+hermes-claude-review run --transcript <path>      # run once manually
 ```
 
-`~/.claude/hermes-self-improvement/config.json` の全キー:
+All keys in `~/.claude/hermes-self-improvement/config.json`:
 
-| キー | デフォルト | 意味 |
+| Key | Default | Meaning |
 |---|---|---|
-| `skills_root` | `~/.claude/skills`(codex 同居時は codex の canonical dir) | skill 本体の置き場所 |
-| `registry_path` | `""`(codex 同居時は codex の registry.json) | ownership registry の場所。空なら `~/.claude/hermes-self-improvement/registry.json` |
-| `import_owner_registries` | `["~/.local/state/hermes-codex/registry.json"]` | registry を共有**しない**構成でのみ有効な、新規登録時の owner 引き継ぎ元 |
-| `background_review.enabled` | `true` | background review の有効 / 無効 |
-| `background_review.interval_turns` | `10` | 起動間隔(ターン)。境界: `count % interval == 0` の Stop で起動 |
-| `background_review.timeout_seconds` | `900` | reviewer の強制終了(下限 30) |
-| `background_review.model` | `""`(セッション既定) | reviewer のモデル |
-| `background_review.max_transcript_bytes` | `26214400`(25MiB) | これを超える transcript は審査しない(上限を含まない) |
-| `background_review.delete_transcript_copy` | `true` | 審査後に transcript コピーを削除 |
-| `validation.max_file_bytes` | `262144`(256KiB) | skill 内 1 ファイルの上限(上限を含まない) |
-| `validation.max_skill_lines` | `500` | SKILL.md の行数上限(上限を含む) |
+| `skills_root` | `~/.claude/skills` (codex canonical dir when coexisting) | Where the skills live |
+| `registry_path` | `""` (codex registry.json when coexisting) | Ownership registry location. Empty means `~/.claude/hermes-self-improvement/registry.json` |
+| `import_owner_registries` | `["~/.local/state/hermes-codex/registry.json"]` | Owner import sources used only in **non-shared** registry setups |
+| `background_review.enabled` | `true` | Toggle background review |
+| `background_review.interval_turns` | `10` | Launch interval in turns. Boundary: launches on Stops where `count % interval == 0` |
+| `background_review.timeout_seconds` | `900` | Reviewer kill timeout (minimum 30) |
+| `background_review.model` | `""` (session default) | Reviewer model |
+| `background_review.max_transcript_bytes` | `26214400` (25MiB) | Transcripts larger than this are skipped (exclusive) |
+| `background_review.delete_transcript_copy` | `true` | Delete the transcript copy after review |
+| `validation.max_file_bytes` | `262144` (256KiB) | Per-file size limit inside a skill (exclusive) |
+| `validation.max_skill_lines` | `500` | SKILL.md line limit (inclusive) |
 
-## 11. 動作テスト
+## 11. Testing
 
-### 11.1 実装 smoke test
+### 11.1 Implementation smoke test
 
 ```bash
 tests/smoke-test.sh
 ```
 
-fake `claude` を PATH に置き、次を一括検証します: SessionStart 初期化とガイダンス注入 / codex config からの skills_root 引き継ぎ / codex registry からの agent ownership 引き継ぎ / agent-owned の自律 create・patch / user-owned の自律変更拒否 / authorize token での一回限り更新 / background actor の authorize 拒否 / PreToolUse の自動許可と非許可 / Stop → background review → UserPromptSubmit 通知の全経路 / 背景ガード下の hook no-op。
+Puts a fake `claude` on PATH and verifies in one run: SessionStart initialization and guidance injection / skills-root inheritance from the codex config / agent-ownership pickup via the shared registry / autonomous create+patch of agent-owned skills / denial of autonomous changes to user-owned skills / single-use token updates / denial of background authorize / PreToolUse allow and non-allow paths / the full Stop → background review → UserPromptSubmit notification pipeline / hook no-ops under the background guard.
 
-### 11.2 実 Claude Code で foreground test
+### 11.2 Foreground test with real Claude Code
 
-新しいセッションで「この手順を skill として保存して」等を依頼し、`hermes-claude-skill list` に agent-owned で現れること、既存 skill への自律変更が拒否されることを確認します。
+In a fresh session, ask something like "save this procedure as a skill" and confirm it appears in `hermes-claude-skill list` as agent-owned, and that autonomous changes to pre-existing skills are denied.
 
 ### 11.3 Background test
 
 ```bash
 hermes-claude-review config --interval 1
-# 何か 1 ターン会話して終了を待つ
-hermes-claude-review logs --tail 1   # 実行ログの確認
-# 次のプロンプト送信時に「Background skill review applied: ...」が注入される
+# have one turn of conversation and let it finish
+hermes-claude-review logs --tail 1   # inspect the run log
+# on your next prompt, "Background skill review applied: ..." is injected
 hermes-claude-review config --interval 10
 ```
 
-## 12. 履歴・監査
+## 12. History and audit
 
 ```bash
-hermes-claude-skill audit --tail 20        # applied / denied / issued / read の JSONL
-ls ~/.claude/hermes-self-improvement/history/<skill>/   # 変更前スナップショット
+hermes-claude-skill audit --tail 20        # applied / denied / issued / read JSONL
+ls ~/.claude/hermes-self-improvement/history/<skill>/   # pre-change snapshots
 ```
 
-audit イベントは actor(foreground / background / manual)、action、owner、変更前後の tree hash、cwd を含みます。denied イベント(保護 skill への自律変更の試み等)もすべて記録されます。
+Audit events include the actor (foreground / background / manual), action, owner, before/after tree hashes, and cwd. Denied events (e.g. attempted autonomous changes to protected skills) are all recorded.
 
-## 13. Hermes upstream 更新
+## 13. Updating the Hermes upstream
 
-vendored prompt は commit pin 済み(`vendor/hermes/UPSTREAM.json`)。更新はこのリポジトリの clone 上で行い、commit して配布します。
+Vendored prompts are commit-pinned (`vendor/hermes/UPSTREAM.json`). Update inside a clone of this repository and commit the result.
 
 ```bash
-bin/hermes-claude-review upstream-update <commit-sha>   # 旧 vendor は state に backup
+bin/hermes-claude-review upstream-update <commit-sha>   # old vendor is backed up to state
 git diff vendor/hermes/ && git commit
 ```
 
-インストール済み plugin の cache 内で直接実行した場合、plugin 更新時に上書きされる点に注意してください。
+If you run this inside an installed plugin's cache directory instead, note it will be overwritten on the next plugin update.
 
-## 14. アンインストール
+## 14. Uninstall
 
 ```text
 /plugin uninstall hermes-self-improvement@lilpacy
 ```
 
-- skill 本体(skills root)には一切触れません
-- ownership registry・audit・history(`~/.claude/hermes-self-improvement/`)は plugin と独立に残ります。完全に消す場合: `rm -rf ~/.claude/hermes-self-improvement`
-- codex 版と異なり hook は plugin 機構ごと外れるため、no-op stub や `--finalize` 手順は不要です
+- The skills themselves (skills root) are never touched
+- The ownership registry, audit, and history (`~/.claude/hermes-self-improvement/`) survive independently of the plugin. To remove them too: `rm -rf ~/.claude/hermes-self-improvement`
+- Unlike the codex adapter, hooks are removed by the plugin system itself, so no no-op stubs or `--finalize` step is needed
 
-## 15. hermes-codex adapter との共存
+## 15. Coexistence with the hermes-codex adapter
 
-両 adapter を併用する前提の設計です。同一マシンに codex adapter が導入済みの場合:
+The design assumes both adapters stay in use. When a codex adapter install exists on the same machine:
 
 ```mermaid
 flowchart LR
-  CX[hermes-codex adapter] -- registry.lock で排他 --> REG[(共有 registry.json)]
-  CL[この plugin] -- registry.lock で排他 --> REG
+  CX[hermes-codex adapter] -- exclusion via registry.lock --> REG[(shared registry.json)]
+  CL[this plugin] -- exclusion via registry.lock --> REG
   CX --> SK[(canonical skills root)]
   CL --> SK
-  CX --> AX[(codex 側 audit / history)]
-  CL --> AL[(claude 側 audit / history)]
+  CX --> AX[(codex-side audit / history)]
+  CL --> AL[(claude-side audit / history)]
 ```
 
-| 項目 | 挙動 |
+| Aspect | Behavior |
 |---|---|
-| skills root | 初回起動時に codex config の `skills_root` を引き継ぎ、両 adapter が同一の canonical dir を管理 |
-| ownership registry | **単一ファイルを共有**(初回起動時に codex の `<state_root>/registry.json` を `registry_path` に設定)。フォーマットは完全互換 |
-| ownership(双方向) | どちらの adapter で create / adopt / release しても、もう一方から即座に同じ owner として見える |
-| authorization token | registry 内で共有される。どちらの adapter で発行しても有効(一回限り・TTL・skill/action 限定は共通) |
-| 排他制御 | registry と同じディレクトリの `registry.lock`(O_EXCL)を両 adapter が取り合う |
-| audit / history / 通知 | それぞれ独立(claude: `~/.claude/hermes-self-improvement/`、codex: `~/.local/state/hermes-codex/`) |
-| `import_owner_registries` | registry を共有しない構成(codex config が無い等)でのみ働く fallback。共有時は登録済み record が常に優先され、実質 no-op |
+| skills root | Inherited from the codex config at first run; both adapters manage the same canonical dir |
+| ownership registry | **A single shared file** (first run sets `registry_path` to the codex `<state_root>/registry.json`). The format is fully compatible |
+| ownership (both directions) | create / adopt / release from either adapter is immediately visible to the other with the same owner |
+| authorization tokens | Shared inside the registry; tokens issued by either adapter are valid (single-use, TTL, skill/action scoping are common) |
+| mutual exclusion | Both adapters contend on `registry.lock` (O_EXCL) next to the registry |
+| audit / history / notifications | Independent per adapter (claude: `~/.claude/hermes-self-improvement/`, codex: `~/.local/state/hermes-codex/`) |
+| `import_owner_registries` | A fallback that only matters in non-shared setups (no codex config present). With a shared registry, existing records always win and it is effectively a no-op |
 
-### Claude Code からの skill 可視性
+### Skill visibility from Claude Code
 
-Claude Code が skill として読み込むのは `~/.claude/skills` / project `.claude/skills` / plugin 同梱分のみです。skills root が canonical dir(例: `~/dotfiles/skills`)の場合、そこに自動作成された skill は **symlink を張るまで Claude Code のセッションには現れません**(dotfiles の `link-skills.sh` のような同期スクリプトの運用に従います)。skill の管理・学習と、どのエージェントにどの skill を見せるかの curation は独立している、という設計です。
+Claude Code loads skills only from `~/.claude/skills`, project `.claude/skills`, and plugin bundles. When the skills root is a canonical dir (e.g. `~/dotfiles/skills`), skills auto-created there **do not appear in Claude Code sessions until you symlink them** (following whatever sync script convention you use, e.g. a dotfiles `link-skills.sh`). Skill management/learning and the curation of which agent sees which skill are deliberately independent.
 
-## 16. 重要な制約
+## 16. Important constraints
 
-- Hermes の memory / curator / archive 機能は移植していません
-- project-local `.claude/skills` は対象外(チーム管理の skill を自律変更しないため)
-- transcript は不安定なフォーマットとして扱い、パースせず生のまま reviewer に渡します
-- background reviewer は通常の Claude Code と同じ認証・利用枠を消費します(モデルは `config --model` で軽量化可能)
-- reviewer の `Write` は一時ディレクトリでの scratch ファイル作成を想定していますが、パス単位では拘束していません(最終防衛線は helper 側の enforcement)
-- registry を codex 側と共有している場合、codex adapter を `--purge-state` 付きでアンインストールすると共有 registry ごと消えます。その後の再登録では全 skill が user-owned 扱いに戻るため、必要なら registry を backup してください
-- helper を迂回した直接ファイル書き込みの禁止は、フォアグラウンドでは Claude Code の通常の permission フロー、それを通過した後は advisory です
+- Hermes's memory / curator / archive features are not ported
+- Project-local `.claude/skills` are out of scope (so team-managed skills are never changed autonomously)
+- Transcripts are treated as an unstable format: passed to the reviewer raw, never parsed
+- The background reviewer consumes the same authentication and usage quota as regular Claude Code (use `config --model` to make it cheaper)
+- The reviewer's `Write` is intended for scratch files in the temp directory but is not path-confined (the last line of defense is the helper's enforcement)
+- When the registry is shared with the codex side, uninstalling the codex adapter with `--purge-state` deletes the shared registry too. Re-registration afterwards reverts all skills to user-owned, so back up the registry if you need it
+- The prohibition on writing skill files directly (bypassing the helper) is enforced in the foreground by Claude Code's normal permission flow, and is advisory beyond that
 
-## 17. 保護の強度
+## 17. Strength of protection
 
-| レイヤ | 内容 | 強制力 |
+| Layer | What it is | Enforcement |
 |---|---|---|
-| helper 内 enforcement | ownership 検査、一回限り token 検証、background actor 制限、skill バリデーション、原子的適用とロールバック | 強制(コードで拒否) |
-| 追跡 | 変更前スナップショット(history)、JSONL audit、tree hash | 事後検証可能 |
-| PreToolUse 自動許可 | ガード済み subcommand のみ許可、ownership 変更系はユーザーの目視承認に残す | 強制(hook で判定) |
-| ガイダンス | SessionStart 注入、`USER APPROVAL REQUIRED` stderr 警告 | 助言のみ |
-| 直接書き込みの禁止 | 「helper 以外で skill を書き換えるな」 | 助言のみ |
+| In-helper enforcement | Ownership checks, single-use token validation, background-actor restrictions, skill validation, atomic apply with rollback | Enforced (denied in code) |
+| Tracking | Pre-change snapshots (history), JSONL audit, tree hashes | Verifiable after the fact |
+| PreToolUse auto-allow | Only guarded subcommands allowed; ownership-changing ones stay on visual user approval | Enforced (decided in the hook) |
+| Guidance | SessionStart injection, `USER APPROVAL REQUIRED` stderr warnings | Advisory only |
+| No direct writes | "Never modify skills except through the helper" | Advisory only |
 
-codex 版 README と同じく、脅威モデルは「エージェントがガイダンスに協力する」ことを前提とします。skills root が git 管理下(dotfiles 等)にあれば、全自律変更は `git diff` で監査できます。
+As with the codex adapter's README: the threat model assumes the agent cooperates with the guidance. If the skills root is under git (e.g. dotfiles), every autonomous change is auditable via `git diff`.
 
 ## License / Notices
 
-`vendor/hermes/` は upstream(NousResearch/hermes-agent)のライセンスに従います。詳細は `THIRD_PARTY_NOTICES.md` と `vendor/hermes/LICENSE.hermes-agent`。
+This project is MIT licensed. `vendor/hermes/` follows the upstream (NousResearch/hermes-agent) license; see `THIRD_PARTY_NOTICES.md` and `vendor/hermes/LICENSE.hermes-agent`.
