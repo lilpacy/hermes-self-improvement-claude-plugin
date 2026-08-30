@@ -11,7 +11,7 @@ Hermes の memory / user modeling / session search は移植対象外。Skill �
 | ループ | 契機 | 仕組み |
 |---|---|---|
 | フォアグラウンド学習 | 会話中の学び(非自明なタスク完了、エラー回復、ユーザー訂正、再利用可能な手順の発見) | `SessionStart` hook が毎セッション Hermes の `SKILLS_GUIDANCE` と adapter ポリシーを context に注入し、Claude 自身がガード付き helper 経由で agent-owned skill を即時作成・patch |
-| バックグラウンド学習 | N ターン完了ごと(デフォルト 10) | `Stop` hook が transcript をコピーし、隔離された `claude -p --bare` プロセスに Hermes の `_SKILL_REVIEW_PROMPT` を実行させて取りこぼしを回収。結果は次の `UserPromptSubmit` で通知 |
+| バックグラウンド学習 | N ターン完了ごと(デフォルト 10) | `Stop` hook が transcript をコピーし、隔離された `claude -p --safe-mode` プロセスに Hermes の `_SKILL_REVIEW_PROMPT` を実行させて取りこぼしを回収。結果は次の `UserPromptSubmit` で通知 |
 
 ### アーキテクチャ
 
@@ -19,7 +19,7 @@ Hermes の memory / user modeling / session search は移植対象外。Skill �
 flowchart TD
   SS[SessionStart hook] -- "初回: config/registry初期化\n毎回: SKILLS_GUIDANCE注入" --> CTX[セッション context]
   ST[Stop hook] -- "Nターンごと transcript copy" --> RW[review_worker.py]
-  RW -- "claude -p --bare --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[隔離 background reviewer]
+  RW -- "claude -p --safe-mode --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[隔離 background reviewer]
   BG --> HL[bin/hermes-claude-skill]
   HL -- "ownership強制 / token / audit / history" --> SK[skills root]
   RW -- notifications.jsonl --> UP[UserPromptSubmit hook]
@@ -188,7 +188,7 @@ flowchart TD
   B -- はい --> C[transcript を runtime/events にコピーし event を queue]
   C --> D[review_worker.py を detach 起動]
   D --> E[一時ディレクトリに transcript を配置]
-  E --> F["claude -p --bare --permission-mode dontAsk<br/>--allowedTools Read,Write,Bash(helper *)"]
+  E --> F["claude -p --safe-mode --permission-mode dontAsk<br/>--allowedTools Read,Write,Bash(helper *)"]
   F --> G[Hermes _SKILL_REVIEW_PROMPT + adapter 制約で審査]
   G --> H[helper 経由の変更のみ audit に applied として残る]
   H --> I[notifications.jsonl に結果を追記 / transcript コピー削除]
@@ -197,7 +197,7 @@ flowchart TD
 
 隔離の内訳:
 
-- `--bare`: hooks / plugins / MCP を読み込まないため、reviewer 自身の Stop hook 再帰が構造的に発生しない(`HERMES_CLAUDE_BACKGROUND=1` ガードも保険で残置)
+- `--safe-mode`: CLAUDE.md / skills / plugins / hooks / MCP を読み込まないため、reviewer 自身の Stop hook 再帰が構造的に発生しない(`HERMES_CLAUDE_BACKGROUND=1` ガードも保険で残置)。`--bare` と違って認証は通常どおり動くため、対話セッションと同じ credential を使える
 - `--permission-mode dontAsk` + `--allowedTools`: 許可プロンプトを出さず、道具を `Read` / `Write` / helper の `Bash` に制限
 - `HERMES_CLAUDE_ACTOR=background`: helper が ownership 変更系コマンドを一律拒否
 - 実行ディレクトリは一時ディレクトリで、元の作業リポジトリには「context としてのみ扱い、アクセスするな」とプロンプトで明示

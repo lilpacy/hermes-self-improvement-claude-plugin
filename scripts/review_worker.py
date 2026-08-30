@@ -124,7 +124,7 @@ def main() -> int:
                 cmd = [
                     "claude",
                     "-p",
-                    "--bare",
+                    "--safe-mode",
                     "--permission-mode",
                     "dontAsk",
                     "--allowedTools",

@@ -12,7 +12,7 @@ mkdir -p "$TMP/fakebin" "$SKILLS/user-skill" "$SKILLS/codex-learned" "$TMP/work"
 cat > "$TMP/fakebin/claude" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" != "-p" || "${2:-}" != "--bare" || "${3:-}" != "--permission-mode" || "${4:-}" != "dontAsk" || "${5:-}" != "--allowedTools" ]]; then
+if [[ "${1:-}" != "-p" || "${2:-}" != "--safe-mode" || "${3:-}" != "--permission-mode" || "${4:-}" != "dontAsk" || "${5:-}" != "--allowedTools" ]]; then
   printf 'unexpected claude argument order: %q\n' "$*" >&2
   exit 8
 fi

@@ -11,7 +11,7 @@ Hermes's memory / user modeling / session search are out of scope. Only the skil
 | Loop | Trigger | Mechanism |
 |---|---|---|
 | Foreground learning | Learnings during conversation (non-trivial task completion, error recovery, user correction, discovery of a reusable procedure) | A `SessionStart` hook injects Hermes's `SKILLS_GUIDANCE` and the adapter policy into context every session; Claude itself creates/patches agent-owned skills immediately through the guarded helper |
-| Background learning | Every N completed turns (default 10) | A `Stop` hook copies the transcript and has an isolated `claude -p --bare` process run Hermes's `_SKILL_REVIEW_PROMPT` to catch missed learnings; results are delivered at the next `UserPromptSubmit` |
+| Background learning | Every N completed turns (default 10) | A `Stop` hook copies the transcript and has an isolated `claude -p --safe-mode` process run Hermes's `_SKILL_REVIEW_PROMPT` to catch missed learnings; results are delivered at the next `UserPromptSubmit` |
 
 ### Architecture
 
@@ -19,7 +19,7 @@ Hermes's memory / user modeling / session search are out of scope. Only the skil
 flowchart TD
   SS[SessionStart hook] -- "first run: init config/registry\nevery run: inject SKILLS_GUIDANCE" --> CTX[session context]
   ST[Stop hook] -- "every N turns: transcript copy" --> RW[review_worker.py]
-  RW -- "claude -p --bare --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[isolated background reviewer]
+  RW -- "claude -p --safe-mode --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[isolated background reviewer]
   BG --> HL[bin/hermes-claude-skill]
   HL -- "ownership enforcement / tokens / audit / history" --> SK[skills root]
   RW -- notifications.jsonl --> UP[UserPromptSubmit hook]
@@ -188,7 +188,7 @@ flowchart TD
   B -- yes --> C[copy transcript to runtime/events and queue an event]
   C --> D[launch review_worker.py detached]
   D --> E[place transcript in a temp directory]
-  E --> F["claude -p --bare --permission-mode dontAsk<br/>--allowedTools Read,Write,Bash(helper *)"]
+  E --> F["claude -p --safe-mode --permission-mode dontAsk<br/>--allowedTools Read,Write,Bash(helper *)"]
   F --> G[review with Hermes _SKILL_REVIEW_PROMPT + adapter constraints]
   G --> H[only helper-mediated changes land in audit as applied]
   H --> I[append result to notifications.jsonl / delete transcript copy]
@@ -197,7 +197,7 @@ flowchart TD
 
 How the isolation works:
 
-- `--bare`: no hooks / plugins / MCP are loaded, so recursion through the reviewer's own Stop hook is structurally impossible (the `HERMES_CLAUDE_BACKGROUND=1` guard remains as a belt-and-braces)
+- `--safe-mode`: no CLAUDE.md / skills / plugins / hooks / MCP are loaded, so recursion through the reviewer's own Stop hook is structurally impossible (the `HERMES_CLAUDE_BACKGROUND=1` guard remains as a belt-and-braces). Unlike `--bare`, `--safe-mode` leaves authentication working normally, so the reviewer can use the same credentials as the interactive session
 - `--permission-mode dontAsk` + `--allowedTools`: no permission prompts; tools restricted to `Read` / `Write` / the helper via `Bash`
 - `HERMES_CLAUDE_ACTOR=background`: the helper rejects all ownership-changing commands outright
 - The working directory is a temp dir; the prompt explicitly says the original repository is context only and must not be touched
