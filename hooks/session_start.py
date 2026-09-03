@@ -52,7 +52,8 @@ def summary_text(policy_path: Path) -> str:
 
 - After a non-trivial workflow discovery, a recovered failure, a user correction, or finding an outdated/wrong skill, consider creating or patching a global skill before ending the turn.
 - Global skill create/update/delete MUST go through `{helper}`; never edit skill directories directly. Existing or unregistered global skills are user-owned and protected — only agent-owned skills may be changed autonomously.
-- Before any skill create/update/delete, read the full policy first: `{policy_path}`
+- Run `authorize`, `create-user`, `adopt`, or `release` only when the user's current explicit request authorizes that exact target and action; never use them to bypass protected/user-owned skill rules.
+- Before any skill create/update/delete/authorize/adopt/release, read the full policy first: `{policy_path}`
 """
 
 
