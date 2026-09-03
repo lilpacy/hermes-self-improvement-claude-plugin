@@ -40,6 +40,22 @@ The following upstream Hermes guidance applies, with `skill_manage` mapped to th
 """
 
 
+def data_root() -> Path:
+    return Path(
+        os.path.expanduser(os.environ.get("HERMES_CLAUDE_DATA_DIR", "~/.claude/hermes-self-improvement"))
+    )
+
+
+def summary_text(policy_path: Path) -> str:
+    helper = PLUGIN_ROOT / "bin/hermes-claude-skill"
+    return f"""## Hermes skill self-improvement
+
+- After a non-trivial workflow discovery, a recovered failure, a user correction, or finding an outdated/wrong skill, consider creating or patching a global skill before ending the turn.
+- Global skill create/update/delete MUST go through `{helper}`; never edit skill directories directly. Existing or unregistered global skills are user-owned and protected — only agent-owned skills may be changed autonomously.
+- Before any skill create/update/delete, read the full policy first: `{policy_path}`
+"""
+
+
 def main() -> int:
     try:
         json.load(sys.stdin)
@@ -58,7 +74,16 @@ def main() -> int:
         )
     except Exception:
         pass
-    print(guidance_text())
+    # Keep the per-session context injection small: write the full policy to a
+    # file and inject only the always-on triggers/guardrails plus a pointer.
+    policy_path = data_root() / "POLICY.md"
+    try:
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(guidance_text(), encoding="utf-8")
+        print(summary_text(policy_path))
+    except Exception:
+        # Fall back to full inline guidance if the policy file cannot be written.
+        print(guidance_text())
     return 0
 
 

@@ -82,10 +82,14 @@ export PATH="$TMP/fakebin:$PYBIN:$PATH"
 HELPER="$ROOT/bin/hermes-claude-skill"
 REVIEW="$ROOT/bin/hermes-claude-review"
 
-# 正常系: SessionStart hookが config/registry を初期化しガイダンスを注入する
+# 正常系: SessionStart hookが config/registry を初期化し、短い要約＋POLICY.mdへのポインタを注入する
 GUIDANCE="$(printf '{}\n' | python3 "$ROOT/hooks/session_start.py")"
-grep -q 'Guarded Claude Code adapter' <<<"$GUIDANCE"
-grep -q 'skill_manage' <<<"$GUIDANCE"
+grep -q 'hermes-claude-skill' <<<"$GUIDANCE"
+grep -q 'POLICY.md' <<<"$GUIDANCE"
+POLICY="$TMP/home/.claude/hermes-self-improvement/POLICY.md"
+[[ -f "$POLICY" ]]
+grep -q 'Guarded Claude Code adapter' "$POLICY"
+grep -q 'skill_manage' "$POLICY"
 CONFIG="$TMP/home/.claude/hermes-self-improvement/config.json"
 [[ -f "$CONFIG" ]]
 

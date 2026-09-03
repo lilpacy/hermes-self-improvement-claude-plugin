@@ -10,14 +10,14 @@ Hermes の memory / user modeling / session search は移植対象外。Skill �
 
 | ループ | 契機 | 仕組み |
 |---|---|---|
-| フォアグラウンド学習 | 会話中の学び(非自明なタスク完了、エラー回復、ユーザー訂正、再利用可能な手順の発見) | `SessionStart` hook が毎セッション Hermes の `SKILLS_GUIDANCE` と adapter ポリシーを context に注入し、Claude 自身がガード付き helper 経由で agent-owned skill を即時作成・patch |
+| フォアグラウンド学習 | 会話中の学び(非自明なタスク完了、エラー回復、ユーザー訂正、再利用可能な手順の発見) | `SessionStart` hook が毎セッション Hermes の `SKILLS_GUIDANCE` + adapter ポリシー全文を `~/.claude/hermes-self-improvement/POLICY.md` に書き出し、短い要約(トリガー・ガードレール・ポインタ)のみを context に注入し、Claude 自身がガード付き helper 経由で agent-owned skill を即時作成・patch |
 | バックグラウンド学習 | N ターン完了ごと(デフォルト 10) | `Stop` hook が transcript をコピーし、隔離された `claude -p --safe-mode` プロセスに Hermes の `_SKILL_REVIEW_PROMPT` を実行させて取りこぼしを回収。結果は次の `UserPromptSubmit` で通知 |
 
 ### アーキテクチャ
 
 ```mermaid
 flowchart TD
-  SS[SessionStart hook] -- "初回: config/registry初期化\n毎回: SKILLS_GUIDANCE注入" --> CTX[セッション context]
+  SS[SessionStart hook] -- "初回: config/registry初期化\n毎回: POLICY.md書き出し+要約注入" --> CTX[セッション context]
   ST[Stop hook] -- "Nターンごと transcript copy" --> RW[review_worker.py]
   RW -- "claude -p --safe-mode --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[隔離 background reviewer]
   BG --> HL[bin/hermes-claude-skill]
@@ -132,7 +132,7 @@ flowchart TD
   F --> G{registry 未登録の skill?}
   G -- "はい / codex registry で agent" --> H[agent-owned として登録]
   G -- "はい / それ以外" --> I[user-owned として登録<br/>symlink は external]
-  G -- いいえ --> J[SKILLS_GUIDANCE を context に注入]
+  G -- いいえ --> J[POLICY.md を書き出し、要約を context に注入]
   H --> J
   I --> J
 ```

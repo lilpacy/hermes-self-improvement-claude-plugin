@@ -10,14 +10,14 @@ Hermes's memory / user modeling / session search are out of scope. Only the skil
 
 | Loop | Trigger | Mechanism |
 |---|---|---|
-| Foreground learning | Learnings during conversation (non-trivial task completion, error recovery, user correction, discovery of a reusable procedure) | A `SessionStart` hook injects Hermes's `SKILLS_GUIDANCE` and the adapter policy into context every session; Claude itself creates/patches agent-owned skills immediately through the guarded helper |
+| Foreground learning | Learnings during conversation (non-trivial task completion, error recovery, user correction, discovery of a reusable procedure) | A `SessionStart` hook writes the full Hermes `SKILLS_GUIDANCE` + adapter policy to `~/.claude/hermes-self-improvement/POLICY.md` and injects only a short summary (triggers, guardrails, pointer) into context every session; Claude itself creates/patches agent-owned skills immediately through the guarded helper |
 | Background learning | Every N completed turns (default 10) | A `Stop` hook copies the transcript and has an isolated `claude -p --safe-mode` process run Hermes's `_SKILL_REVIEW_PROMPT` to catch missed learnings; results are delivered at the next `UserPromptSubmit` |
 
 ### Architecture
 
 ```mermaid
 flowchart TD
-  SS[SessionStart hook] -- "first run: init config/registry\nevery run: inject SKILLS_GUIDANCE" --> CTX[session context]
+  SS[SessionStart hook] -- "first run: init config/registry\nevery run: write POLICY.md, inject short summary" --> CTX[session context]
   ST[Stop hook] -- "every N turns: transcript copy" --> RW[review_worker.py]
   RW -- "claude -p --safe-mode --permission-mode dontAsk\n--allowedTools Read,Write,Bash(helper *)" --> BG[isolated background reviewer]
   BG --> HL[bin/hermes-claude-skill]
@@ -132,7 +132,7 @@ flowchart TD
   F --> G{skills not yet in the registry?}
   G -- "yes / agent in shared registry" --> H[register as agent-owned]
   G -- "yes / anything else" --> I[register as user-owned<br/>symlinks as external]
-  G -- no --> J[inject SKILLS_GUIDANCE into context]
+  G -- no --> J[write POLICY.md, inject short summary into context]
   H --> J
   I --> J
 ```
