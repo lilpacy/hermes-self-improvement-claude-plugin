@@ -126,6 +126,11 @@ def sync_all(config: dict[str, Any], registry: dict[str, Any], skills_root: Path
     for path in sorted(skills_root.iterdir()):
         if path.name.startswith("."):
             continue
+        # Skip pre-existing skills whose names don't satisfy the manager's
+        # naming rule (e.g. underscores); they stay unmanaged instead of
+        # crashing every command at sync time.
+        if not SKILL_NAME_RE.fullmatch(path.name):
+            continue
         if not ((path.is_dir() or path.is_symlink()) and (path / "SKILL.md").exists()):
             continue
         known = path.name in registry["skills"]
