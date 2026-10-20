@@ -52,6 +52,15 @@ def process_file(path: Path) -> list[str]:
                 messages.append(f"Background skill review applied: {rendered}. Log: {item.get('log')}")
             elif item.get("returncode") not in (0, None):
                 messages.append(f"Background skill review failed; inspect {item.get('log')}")
+            overlaps = item.get("overlaps") or []
+            if overlaps:
+                rendered = "; ".join(
+                    f"{' / '.join(o.get('skills') or [])}: {o.get('reason', '')}" for o in overlaps
+                )
+                messages.append(
+                    "Background skill review found overlapping skills it did not patch: "
+                    f"{rendered}. Consolidate with the skill-restructuring skill. Log: {item.get('log')}"
+                )
         records.append(item)
     if changed:
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")

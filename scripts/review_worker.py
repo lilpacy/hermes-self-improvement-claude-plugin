@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -79,9 +80,29 @@ Mandatory constraints:
 8. If nothing is worth saving, make no changes.
 9. Before changing a skill, run `list` and `view` and read the relevant complete SKILL.md.
 10. A created SKILL.md must use valid frontmatter with matching lowercase hyphenated `name` and a precise `description`.
+11. When a learning belongs in a protected or user-owned skill, or when two skills overlap or contradict each other, do not patch an agent-owned skill with "prefer skill X", "see skill X", or "older method" paragraphs as a substitute: that leaves two policies in one skill and the foreground session cannot see it. Instead print one line per case at the end of your reply, exactly `OVERLAP: <skill-a> <skill-b>: <one sentence>`, and make no pointer edit. The foreground session consolidates with its own authority.
 
 Finish with a concise summary of skill changes, or state that no durable skill change was justified.
 """
+
+
+OVERLAP_LINE = re.compile(r"^\s*OVERLAP:\s*(?P<a>[a-z0-9][a-z0-9-]*)\s+(?P<b>[a-z0-9][a-z0-9-]*)\s*:\s*(?P<why>.+?)\s*$")
+
+
+def parse_overlaps(stdout: str) -> list[dict[str, str]]:
+    """Collect `OVERLAP: <a> <b>: <why>` lines the reviewer was told to print instead of patching."""
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line in stdout.splitlines():
+        match = OVERLAP_LINE.match(line)
+        if not match:
+            continue
+        key = (match.group("a"), match.group("b"))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"skills": [key[0], key[1]], "reason": match.group("why")[:300]})
+    return found
 
 
 def main() -> int:
@@ -188,6 +209,7 @@ def main() -> int:
             event_path.unlink(missing_ok=True)
 
     _, changes = audit_events(audit_path, before_offset)
+    overlaps = parse_overlaps(stdout)
     notification = {
         "id": event_id,
         "created_at": now_iso(),
@@ -198,6 +220,7 @@ def main() -> int:
             {"action": item.get("action"), "skill": item.get("skill"), "owner": item.get("owner")}
             for item in changes
         ],
+        "overlaps": overlaps,
         "delivered": False,
         "log": str(log_path),
     }
