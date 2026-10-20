@@ -300,7 +300,8 @@ In a fresh session, ask something like "save this procedure as a skill" and conf
 hermes-claude-review config --interval 1
 # have one turn of conversation and let it finish
 hermes-claude-review logs --tail 1   # inspect the run log
-# on your next prompt, "Background skill review applied: ..." is injected
+# on your next prompt, "Background skill review applied: ..." is injected;
+# overlaps the reviewer reported instead of patching arrive as "Background skill review found overlapping skills ..."
 hermes-claude-review config --interval 10
 ```
 

@@ -43,6 +43,7 @@ if "$HELPER" authorize user-skill --actions patch; then
   echo 'background issued an authorization' >&2
   exit 9
 fi
+echo 'OVERLAP: user-skill codex-learned: both describe the same procedure'
 exit 0
 EOF
 chmod +x "$TMP/fakebin/claude"
@@ -169,6 +170,7 @@ done
 NOTICE="$(printf '%s\n' '{"session_id":"smoke-session","prompt":"next","cwd":"/tmp","hook_event_name":"UserPromptSubmit"}' \
   | python3 "$ROOT/hooks/user_prompt_submit.py")"
 grep -q 'Background skill review applied' <<<"$NOTICE"
+grep -q 'overlapping skills it did not patch: user-skill / codex-learned: both describe the same procedure' <<<"$NOTICE"
 
 # 正常系: 背景実行ガード下ではStop/SessionStartは即時no-op
 printf '{}\n' | HERMES_CLAUDE_BACKGROUND=1 python3 "$ROOT/hooks/stop.py" | grep -q '"continue": true'

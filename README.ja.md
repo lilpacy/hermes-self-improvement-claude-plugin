@@ -301,6 +301,7 @@ hermes-claude-review config --interval 1
 # 何か 1 ターン会話して終了を待つ
 hermes-claude-review logs --tail 1   # 実行ログの確認
 # 次のプロンプト送信時に「Background skill review applied: ...」が注入される
+# reviewer が patch せず報告した重複は「Background skill review found overlapping skills ...」として届く
 hermes-claude-review config --interval 10
 ```
 
